@@ -140,8 +140,38 @@ def connect():
         except OSError: pass
     return db
 
+def purged_keys(db):
+    row=db.execute("SELECT value FROM settings WHERE key='purged_json'").fetchone()
+    try:return set(json.loads(row['value'])) if row else set()
+    except Exception:return set()
+
+def add_purged(db,keys):
+    merged=sorted(purged_keys(db)|set(keys))
+    db.execute("INSERT INTO settings(key,value) VALUES('purged_json',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(merged),))
+
+def remove_from_menus(db,slug):
+    targets=(f'pages/{slug}.html',f'{slug}.html',slug)
+    for key in ('menu_json','footer_menu_json','top_menu_json'):
+        row=db.execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone()
+        if row:
+            try:
+                items=[i for i in json.loads(row['value']) if i.get('href') not in targets]
+                db.execute('UPDATE settings SET value=? WHERE key=?',(json.dumps(items,ensure_ascii=False),key))
+            except Exception:pass
+    trrow=db.execute("SELECT value FROM settings WHERE key='translations_json'").fetchone()
+    if trrow:
+        try:
+            translations=json.loads(trrow['value'])
+            for lang in translations.values():
+                lang.get('pages',{}).pop(slug,None)
+                for group in lang.get('menus',{}).values():group[:]=[i for i in group if i.get('href') not in targets]
+            db.execute("UPDATE settings SET value=? WHERE key='translations_json'",(json.dumps(translations,ensure_ascii=False),))
+        except Exception:pass
+
 def seed_pages(db):
+    purged=purged_keys(db)
     for f in sorted((ROOT/'pages').glob('*.html')):
+        if f'page:{f.stem}' in purged:continue
         raw=f.read_text(encoding='utf-8',errors='ignore')
         title=re.search(r'<h1[^>]*>(.*?)</h1>',raw,re.S)
         title=re.sub('<.*?>','',title.group(1)).strip() if title else f.stem.replace('-',' ').title()
@@ -153,10 +183,11 @@ def seed_pages(db):
     db.commit()
 
 def seed_tours_from_pages(db):
+    purged=purged_keys(db)
     all_pages={**TOUR_PAGES,**TOUR_CATEGORY_PAGES}
     for slug,category in all_pages.items():
         page=db.execute('SELECT * FROM pages WHERE slug=?',(slug,)).fetchone()
-        if not page: continue
+        if not page or f'page:{slug}' in purged: continue
         ascii_slug=__import__('unicodedata').normalize('NFKD',slug).encode('ascii','ignore').decode().lower()
         try:
             record_type='category' if slug in TOUR_CATEGORY_PAGES else 'tour'
@@ -554,29 +585,12 @@ class Handler(SimpleHTTPRequestHandler):
             try:d=self.admin_body()
             except Exception as e:return self.send_json({'error':str(e)},400)
             slug=str(d.get('slug',''))
-            if slug=='home':return self.send_json({'error':'Ana sayfa silinemez.'},400)
-            db=connect(); physical=(ROOT/'pages'/f'{slug}.html').exists()
-            if physical:
-                db.execute("UPDATE pages SET active=FALSE,status='deleted' WHERE slug=?",(slug,))
-                db.execute("UPDATE tours SET active=FALSE,status='deleted' WHERE static_page_slug=?",(slug,))
-            else:db.execute('DELETE FROM pages WHERE slug=?',(slug,))
-            for key in ('menu_json','footer_menu_json','top_menu_json'):
-                row=db.execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone()
-                if row:
-                    try:
-                        items=json.loads(row['value']); items=[i for i in items if i.get('href') not in (f'pages/{slug}.html',f'{slug}.html',slug)]
-                        db.execute('UPDATE settings SET value=? WHERE key=?',(json.dumps(items,ensure_ascii=False),key))
-                    except Exception:pass
-            trrow=db.execute("SELECT value FROM settings WHERE key='translations_json'").fetchone()
-            if trrow:
-                try:
-                    translations=json.loads(trrow['value'])
-                    for lang in translations.values():
-                        lang.get('pages',{}).pop(slug,None)
-                        for group in lang.get('menus',{}).values():group[:]=[i for i in group if i.get('href') not in (f'pages/{slug}.html',f'{slug}.html',slug)]
-                    db.execute("UPDATE settings SET value=? WHERE key='translations_json'",(json.dumps(translations,ensure_ascii=False),))
-                except Exception:pass
-            db.commit(); db.close(); return self.send_json({'ok':True})
+            if slug=='home':return self.send_json({'error':'Ana sayfa silinemez; içeriğini düzenleyebilirsiniz.'},400)
+            db=connect()
+            db.execute("UPDATE pages SET active=FALSE,status='deleted' WHERE slug=?",(slug,))
+            db.execute("UPDATE tours SET active=FALSE,status='deleted' WHERE static_page_slug=?",(slug,))
+            remove_from_menus(db,slug)
+            db.commit(); db.close(); return self.send_json({'ok':True,'trashed':True})
         if p=='/api/admin/tours' and method=='POST':
             try:d=self.admin_body()
             except Exception as e:return self.send_json({'error':str(e)},400)
@@ -626,7 +640,43 @@ class Handler(SimpleHTTPRequestHandler):
         if p=='/api/admin/tours/delete' and method=='POST':
             try:d=self.admin_body()
             except Exception as e:return self.send_json({'error':str(e)},400)
-            db=connect(); db.execute('DELETE FROM tours WHERE slug=?',(str(d.get('slug','')),)); db.commit(); db.close(); return self.send_json({'ok':True})
+            slug=str(d.get('slug','')); db=connect()
+            row=db.execute('SELECT static_page_slug FROM tours WHERE slug=?',(slug,)).fetchone()
+            db.execute("UPDATE tours SET active=FALSE,status='deleted' WHERE slug=?",(slug,))
+            if row and row['static_page_slug']:
+                db.execute("UPDATE pages SET active=FALSE,status='deleted' WHERE slug=?",(row['static_page_slug'],))
+                remove_from_menus(db,row['static_page_slug'])
+            db.commit(); db.close(); return self.send_json({'ok':True,'trashed':True})
+        if p in ('/api/admin/trash/restore','/api/admin/trash/purge','/api/admin/trash/empty') and method=='POST':
+            try:d=self.admin_body()
+            except Exception as e:return self.send_json({'error':str(e)},400)
+            db=connect(); action=p.rsplit('/',1)[1]
+            if action=='empty':
+                items=[('page',r['slug']) for r in db.execute("SELECT slug FROM pages WHERE status='deleted'")]+[('tour',r['slug']) for r in db.execute("SELECT slug FROM tours WHERE status='deleted'")]
+            else:
+                items=[(str(d.get('kind','')),str(d.get('slug','')))]
+            for kind,slug in items:
+                if kind=='page':
+                    if action=='restore':
+                        db.execute("UPDATE pages SET active=TRUE,status='published' WHERE slug=? AND status='deleted'",(slug,))
+                        db.execute("UPDATE tours SET active=TRUE,status='published' WHERE static_page_slug=? AND status='deleted'",(slug,))
+                    else:
+                        db.execute("DELETE FROM tours WHERE static_page_slug=? AND status='deleted'",(slug,))
+                        db.execute("DELETE FROM pages WHERE slug=? AND status='deleted'",(slug,))
+                        add_purged(db,[f'page:{slug}'])
+                elif kind=='tour':
+                    row=db.execute("SELECT static_page_slug FROM tours WHERE slug=? AND status='deleted'",(slug,)).fetchone()
+                    if not row:continue
+                    linked=row['static_page_slug']
+                    if action=='restore':
+                        db.execute("UPDATE tours SET active=TRUE,status='published' WHERE slug=?",(slug,))
+                        if linked:db.execute("UPDATE pages SET active=TRUE,status='published' WHERE slug=? AND status='deleted'",(linked,))
+                    else:
+                        db.execute("DELETE FROM tours WHERE slug=? AND status='deleted'",(slug,))
+                        if linked:
+                            db.execute("DELETE FROM pages WHERE slug=? AND status='deleted'",(linked,))
+                            add_purged(db,[f'page:{linked}'])
+            db.commit(); db.close(); return self.send_json({'ok':True})
         if p=='/api/admin/settings' and method=='POST':
             try:d=self.admin_body()
             except Exception as e:return self.send_json({'error':str(e)},400)
@@ -656,6 +706,20 @@ class Handler(SimpleHTTPRequestHandler):
             if not valid:db.close(); return self.send_json({'error':'Mevcut parola hatalı.'},401)
             if len(password)<12 or len(password)>256:db.close(); return self.send_json({'error':'Yeni parola 12–256 karakter olmalı.'},400)
             salt=secrets.token_bytes(16); digest=hashlib.pbkdf2_hmac('sha256',password.encode(),salt,310000).hex(); db.execute("UPDATE settings SET value=? WHERE key='password_hash'",('pbkdf2$310000$'+salt.hex()+'$'+digest,)); db.commit(); db.close(); return self.send_json({'ok':True})
+        if p=='/api/admin/files' and method=='GET':
+            items=[]
+            for f in UPLOADS.iterdir():
+                if f.is_file() and not f.name.startswith('.'):
+                    st=f.stat(); items.append({'name':f.name,'url':'/assets/uploads/'+f.name,'size':st.st_size,'modified':int(st.st_mtime)})
+            items.sort(key=lambda x:x['modified'],reverse=True); return self.send_json(items)
+        if p=='/api/admin/files/delete' and method=='POST':
+            try:d=self.admin_body()
+            except Exception as e:return self.send_json({'error':str(e)},400)
+            name=str(d.get('name',''))
+            if not re.fullmatch(r'[A-Za-z0-9._-]{1,120}',name) or name.startswith('.'):return self.send_json({'error':'Geçersiz dosya adı.'},400)
+            target=UPLOADS/name
+            if not target.is_file():return self.send_json({'error':'Dosya bulunamadı.'},404)
+            target.unlink(); return self.send_json({'ok':True})
         if p=='/api/admin/upload' and method=='POST':
             try:d=self.admin_body(); data_url=str(d.get('data',''))
             except Exception as e:return self.send_json({'error':str(e)},400)
@@ -778,6 +842,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_public_html(document)
         if p.startswith('/pages/') and p.endswith('.html'):
             slug=Path(unquote(p)).stem
+            _db=connect(); _gone=f'page:{slug}' in purged_keys(_db); _db.close()
+            if _gone:return self.send_error(404,'Bu sayfa silindi.')
             if slug in TOUR_PAGES and slug not in ('umre','hac'):
                 db=connect(); tour=db.execute("SELECT * FROM tours WHERE static_page_slug=? AND active=TRUE AND status='published'",(slug,)).fetchone(); db.close()
                 if tour:
