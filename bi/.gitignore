@@ -1,0 +1,10 @@
+data/
+assets/uploads/*
+!assets/uploads/.gitkeep
+__pycache__/
+
+.env
+.env.*
+!.env.example
+
+.venv/
