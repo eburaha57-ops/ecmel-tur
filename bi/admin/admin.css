@@ -104,3 +104,18 @@
 .seo-list{display:flex;flex-direction:column;gap:8px}.seo-row{border:1px solid var(--line);border-radius:11px;background:#fff}.seo-row[hidden]{display:none}.seo-row>summary{display:flex;align-items:center;gap:12px;padding:12px 16px;cursor:pointer;list-style:none}.seo-row>summary::-webkit-details-marker{display:none}.seo-row>summary b{font-size:13px;color:#20392e}.seo-row>summary span{color:#89968d;font-size:11px;flex:1}.seo-row>summary em{font-style:normal;font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;background:#eef1ec;color:#7a877f}.seo-row>summary em.seo-custom{background:#e3f1e7;color:#2a6b45}.seo-row[open]>summary{border-bottom:1px solid var(--line)}.seo-row-body{padding:14px 16px 16px}
 .design-tabs{margin:0 0 14px}.editor-grid .form-card[hidden]{display:none}
 input[type=file]::file-selector-button{margin-right:10px;padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:#f5f8f5;color:#234b3b;font-weight:600;font-size:11px;cursor:pointer}input[type=file]::file-selector-button:hover{background:#e9f0ea}
+
+/* tur: süre seçenekleri ve konaklama */
+.tour-duration-list{display:grid;gap:12px;margin-top:14px}
+.tour-duration-card{padding:14px;border:1px solid #e0e7df;border-left:3px solid #2f5d46;border-radius:9px;background:#fbfcfa}
+.tour-duration-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.tour-package-fields.duration-fields{grid-template-columns:repeat(4,minmax(100px,1fr));max-width:none}
+.duration-hint{display:block;margin-top:8px;color:var(--muted);font-size:10px}
+.tour-stays-editor{margin-top:12px;padding:12px;border:1px dashed #cfd9cf;border-radius:8px;background:#fff}
+.tour-stays-editor .room-pricing-head{margin:0 0 10px;padding-top:0;border-top:0}
+.tour-stay-row{display:grid;grid-template-columns:1.2fr 1.4fr 80px 28px;gap:8px;align-items:end;margin-bottom:8px}
+.tour-stay-row label{display:grid;gap:5px;color:#58675c;font-size:10px;font-weight:700}
+.tour-stay-row .control{padding:9px 10px;font-size:12px}
+.stay-total{margin:6px 0 0;font-size:11px;color:var(--muted)}.stay-total.ok{color:#2f6b45;font-weight:700}.stay-total.warn{color:#b3501f;font-weight:700}
+[data-add-duration]{margin-top:12px}
+@media(max-width:700px){.tour-package-fields.duration-fields{grid-template-columns:1fr 1fr}.tour-stay-row{grid-template-columns:1fr 70px 28px}.tour-stay-row label:nth-child(2){grid-column:1/3}}
