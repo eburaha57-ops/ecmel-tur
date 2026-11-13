@@ -436,6 +436,7 @@ class Handler(SimpleHTTPRequestHandler):
             candidate=backgrounds.get('error_404','')
             if isinstance(candidate,str) and (candidate.startswith('/') or candidate.startswith('https://')): background=candidate.replace('\\','').replace('"','').replace("'",'')
         except Exception: pass
+        if not background: background='/assets/mecca-hero.jpg'
         is_missing=code==404
         title='Bu sayfa bulunamadı' if is_missing else 'Bir sorun oluştu'
         description='Aradığınız sayfa taşınmış veya adresi değişmiş olabilir.' if is_missing else 'İsteğiniz şu anda tamamlanamadı. Lütfen biraz sonra yeniden deneyin.'
