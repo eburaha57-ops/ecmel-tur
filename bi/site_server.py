@@ -4,7 +4,7 @@ from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, unquote, urlencode
 import hashlib, html, json, os, re, sqlite3, time, threading, secrets, mimetypes, base64, ipaddress
-import urllib.request
+import urllib.request, urllib.error
 from datetime import datetime, timedelta, time as datetime_time
 
 ROOT = Path(__file__).resolve().parent
@@ -71,6 +71,53 @@ def configured_analytics_host(db):
         return analytics_host(seo.get('site_url',''))
     except (TypeError,ValueError,AttributeError):
         return ''
+
+class AiError(Exception):
+    def __init__(self,message,status=502): super().__init__(message); self.status=status
+_ai_calls={}
+AI_TOUR_PROMPT = """Bu bir seyahat acentesinin tur broşürü. İçindeki bilgileri aşağıdaki JSON biçiminde çıkar. SADECE JSON döndür, açıklama yazma.
+Kurallar: Broşürde olmayan hiçbir bilgiyi uydurma; bilinmeyen alanı "" (metin) veya [] (liste) bırak. Tarihler YYYY-MM-DD. Para birimi yalnızca USD, EUR, TRY veya SAR. Fiyat sayı olsun (binlik ayırıcı yok). Metinler Türkçe ve broşüre sadık olsun.
+{
+ "title": "tur adı",
+ "category": "Umre | Hac | Kültür Turları | Yurtdışı Turlar | Yurtiçi · Günübirlik | Yurtiçi · Konaklamalı | Yurtiçi · Kaplıca seçeneklerinden biri",
+ "description": "2-3 cümlelik kısa tanıtım",
+ "flight_info": "ulaşım ve uçuş bilgisi",
+ "content": "günlük program akışı, her gün ayrı satırda",
+ "included_services": "fiyata dahil olanlar, her biri ayrı satırda",
+ "excluded_services": "fiyata dahil olmayanlar, her biri ayrı satırda",
+ "price_details": "çocuk/tek kişi farkı vb. ek fiyat notları",
+ "departures": [
+  {"event_name": "varsa etkinlik adı", "outbound_date": "YYYY-MM-DD",
+   "durations": [
+    {"nights": 7, "days": 8, "return_date": "YYYY-MM-DD veya boş",
+     "stays": [{"city": "Mekke", "hotel": "otel adı veya boş", "nights": 4}],
+     "rooms": [{"room": "2 kişilik oda", "amount": 1500, "currency": "USD"}]}
+   ]}
+ ]
+}
+Aynı hareket tarihinde birden fazla süre (örn. 9 gece ve 13 gece) varsa her birini ayrı durations öğesi yap."""
+def ai_read_brochure(mime,b64):
+    key=os.environ.get('ANTHROPIC_API_KEY','').strip()
+    if not key: raise AiError('Yapay zekâ henüz etkin değil: sunucuya ANTHROPIC_API_KEY eklenmemiş.',503)
+    today=time.strftime('%Y-%m-%d'); limit=int(os.environ.get('ECMEL_AI_DAILY_LIMIT','30') or 30)
+    if _ai_calls.get(today,0)>=limit: raise AiError('Günlük broşür okuma sınırına ulaşıldı. Yarın yeniden deneyin.',429)
+    block={'type':'document','source':{'type':'base64','media_type':mime,'data':b64}} if mime=='application/pdf' else {'type':'image','source':{'type':'base64','media_type':mime,'data':b64}}
+    payload={'model':os.environ.get('ECMEL_AI_MODEL','claude-sonnet-5-5'),'max_tokens':6000,'messages':[{'role':'user','content':[block,{'type':'text','text':AI_TOUR_PROMPT}]}]}
+    base=os.environ.get('ECMEL_AI_BASE','https://api.anthropic.com').rstrip('/')
+    req=urllib.request.Request(base+'/v1/messages',data=json.dumps(payload).encode(),headers={'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01'},method='POST')
+    try:
+        with urllib.request.urlopen(req,timeout=120) as r: out=json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise AiError('Yapay zekâ servisi hata verdi (%s). API anahtarını ve bakiyeyi kontrol edin.'%e.code,502)
+    except Exception:
+        raise AiError('Yapay zekâ servisine ulaşılamadı. Lütfen tekrar deneyin.',502)
+    _ai_calls[today]=_ai_calls.get(today,0)+1
+    text=''.join(c.get('text','') for c in out.get('content',[]) if c.get('type')=='text')
+    m=re.search(r'\{.*\}',text,re.S)
+    try: data=json.loads(m.group(0)) if m else None
+    except Exception: data=None
+    if not isinstance(data,dict): raise AiError('Broşürden bilgi okunamadı. Daha net bir dosya deneyin.',422)
+    return data
 
 class Database:
     """Small SQLite/PostgreSQL adapter used by the existing CMS queries."""
@@ -732,6 +779,15 @@ class Handler(SimpleHTTPRequestHandler):
             if match.group(1)=='application/pdf' and not blob.startswith(b'%PDF-'):return self.send_json({'error':'Seçilen dosya geçerli bir PDF değil.'},400)
             ext={'image/jpeg':'jpg','image/png':'png','image/webp':'webp','image/gif':'gif','application/pdf':'pdf'}[match.group(1)]
             name=secrets.token_hex(16)+'.'+ext; (UPLOADS/name).write_bytes(blob); return self.send_json({'ok':True,'url':'/assets/uploads/'+name})
+        if p=='/api/admin/ai/brochure' and method=='POST':
+            try:d=self.admin_body()
+            except Exception as e:return self.send_json({'error':str(e)},400)
+            match=re.fullmatch(r'data:(image/(?:jpeg|png|webp|gif)|application/pdf);base64,([A-Za-z0-9+/=]+)',str(d.get('data','')))
+            if not match:return self.send_json({'error':'Broşür PDF, JPG, PNG veya WebP olmalı.'},400)
+            try:
+                result=ai_read_brochure(match.group(1),match.group(2))
+            except AiError as e:return self.send_json({'error':str(e)},e.status)
+            return self.send_json({'ok':True,'tour':result})
         if p=='/api/admin/review' and method=='POST':
             try:d=self.admin_body()
             except Exception as e:return self.send_json({'error':str(e)},400)
